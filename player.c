@@ -22,6 +22,8 @@ static const char *mixer_name = "Master";  // 默认控制主音量
 static long int volume_min = 0;
 static long int volume_max = 100;
 static int current_volume = 50;  // 默认音量50%
+static unsigned char *g_decode_buffer;
+static size_t g_decode_buffer_size;
 
 int init_output_device() {
 
@@ -91,21 +93,48 @@ static void* playback_thread(void* arg);
 
 static size_t my_curl_write_callback(void *ptr, size_t size, size_t nmemb, void *userdata) {
     size_t bytes = size * nmemb;
-
-    // 送数据给mpg123解码器
-    int err = mpg123_feed(mh, ptr, bytes);
+    int err;
+    size_t done = 0;
+    // 将下载的MP3数据送入解码器
+    err = mpg123_feed(mh, ptr, bytes);
     if (err != MPG123_OK) {
-        fprintf(stderr, "mpg123_feed error: %s\n", mpg123_strerror(mh));
-        return 0; // 停止curl传输
+        fprintf(stderr, "[ERROR] mpg123_feed failed: %s\n", mpg123_strerror(mh));
+        return CURL_READFUNC_ABORT; // 正确通知 curl 终止下载
     }
 
-    // 尝试从mpg123读取解码PCM数据并播放
-    unsigned char buffer[8192];
-    size_t done;
-    while (mpg123_read(mh, buffer, sizeof(buffer), &done) == MPG123_OK) {
-        ao_play(dev, (char*)buffer, done);
-        current_sample += done / (channels * mpg123_encsize(encoding));
+    // 从解码器中读取PCM数据并播放
+    while (!stop_flag) {
+        if (paused) {
+            usleep(10000);
+            continue;
+        }
+
+        err = mpg123_read(mh, g_decode_buffer, g_decode_buffer_size, &done);
+
+        if (err == MPG123_OK) {
+            ao_play(dev, (char *)g_decode_buffer, done);
+            current_sample += done / (channels * mpg123_encsize(encoding));
+
+        } else if (err == MPG123_NEW_FORMAT) {
+            long rate;
+            int channels_local, encoding_local;
+            mpg123_getformat(mh, &rate, &channels_local, &encoding_local);
+            fprintf(stderr, "[WARN] New format detected: %ld Hz, %d channels\n", rate, channels_local);
+            // 可在此重新配置ao设备等
+        } else if (err == MPG123_NEED_MORE) {
+            // 当前缓存数据不够解出完整帧，退出等待下一次 feed
+            break;
+        } else if (err == MPG123_DONE) {
+            fprintf(stderr, "[INFO] Stream finished: %s\n", mpg123_strerror(mh));
+            stop_flag = 1;
+            break;
+        } else {
+            fprintf(stderr, "[ERROR] mpg123_read failed: %s\n", mpg123_strerror(mh));
+            stop_flag = 1;
+            break;
+        }
     }
+
     return bytes;
 }
 
@@ -260,6 +289,12 @@ int player_init(void) {
         fprintf(stderr, "Failed to create mpg123 handle\n");
         return -1;
     }
+    g_decode_buffer_size = mpg123_outblock(mh);
+    g_decode_buffer = malloc(g_decode_buffer_size);
+    if (!g_decode_buffer) {
+        perror("malloc");
+        return -1;
+    }
     // 初始化ALSA混音器
     if (snd_mixer_open(&mixer_handle, 0) < 0) {
         fprintf(stderr, "Failed to open ALSA mixer\n");
@@ -376,5 +411,7 @@ int player_deinit(void) {
         mixer_handle = NULL;
         mixer_elem = NULL;
     }
+    if(g_decode_buffer)
+	free(g_decode_buffer);
     return 0;
 }
