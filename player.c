@@ -36,7 +36,6 @@ int init_output_device() {
     int driver_count = 0;
     int alsa_driver = -1;
     int default_driver = -1;
-    ao_device *device = NULL;
 
     driver_info_list = ao_driver_info_list(&driver_count);
     if (!driver_info_list) {
@@ -57,9 +56,9 @@ int init_output_device() {
     // 如果找到alsa，则尝试用alsa打开
     if (alsa_driver >= 0) {
         printf("Trying to use ALSA driver...\n");
-        device = ao_open_live(alsa_driver, &format, NULL);
+        dev = ao_open_live(alsa_driver, &format, NULL);
 	printf("Format: rate=%d, bits=%d, channels=%d\n", format.rate, format.bits, format.channels);
-        if (device) {
+        if (dev) {
             printf("Audio output initialized with ALSA.\n");
             return 0;
         }else {
@@ -75,8 +74,8 @@ int init_output_device() {
     }
 
     printf("Trying to use default driver: %s\n", driver_info_list[default_driver]->short_name);
-    device = ao_open_live(default_driver, &format, NULL);
-    if (device) {
+    dev = ao_open_live(default_driver, &format, NULL);
+    if (dev) {
         printf("Audio output initialized with default driver.\n");
         return 0;
     } else {
