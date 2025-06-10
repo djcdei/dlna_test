@@ -6,11 +6,6 @@
 #include <stdlib.h>
 #include <glib.h>
 
-#define LOG_PREFIX "[PLAYER] "
-#define LOG_INFO(fmt, ...) printf(LOG_PREFIX "[INFO] " fmt "\n", ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) fprintf(stderr, LOG_PREFIX "[ERROR] " fmt "\n", ##__VA_ARGS__)
-#define LOG_DEBUG(fmt, ...) printf(LOG_PREFIX "[DEBUG] " fmt "\n", ##__VA_ARGS__)
-
 static GstElement *pipeline = NULL;
 static volatile int playing = 0;
 static volatile int paused = 0;
@@ -25,12 +20,12 @@ static void on_pad_added(GstElement *src, GstPad *new_pad, gpointer data) {
     GstElement *convert = (GstElement *)data;
     GstPad *sink_pad = gst_element_get_static_pad(convert, "sink");
 
-    printf("[pad-added] Received new pad '%s' from '%s'\n",
+    LOG_INFO("[pad-added] Received new pad '%s' from '%s'",
            GST_PAD_NAME(new_pad), GST_ELEMENT_NAME(src));
 
     // 检查是否已连接
     if (gst_pad_is_linked(sink_pad)) {
-        printf("[pad-added] Sink pad already linked. Ignoring.\n");
+        LOG_INFO("[pad-added] Sink pad already linked. Ignoring.");
         gst_object_unref(sink_pad);
         return;
     }
@@ -38,9 +33,9 @@ static void on_pad_added(GstElement *src, GstPad *new_pad, gpointer data) {
     // 尝试直接连接而不检查caps
     GstPadLinkReturn ret = gst_pad_link(new_pad, sink_pad);
     if (ret == GST_PAD_LINK_OK) {
-        printf("[pad-added] Successfully linked pad\n");
+        LOG_INFO("[pad-added] Successfully linked pad");
     } else {
-        printf("[pad-added] Linking failed: %s\n", gst_pad_link_get_name(ret));
+        LOG_ERROR("[pad-added] Linking failed: %s", gst_pad_link_get_name(ret));
     }
 
     gst_object_unref(sink_pad);
@@ -52,7 +47,7 @@ static gboolean bus_callback(GstBus *bus, GstMessage *msg, gpointer data) {
 
     switch (GST_MESSAGE_TYPE(msg)) {
     case GST_MESSAGE_EOS:
-        LOG_INFO("End of stream reached");
+        LOG_INFO("[%s] End of stream reached",__func__);
         pthread_mutex_lock(&lock);
         playing = 0;
         pthread_mutex_unlock(&lock);
@@ -63,7 +58,28 @@ static gboolean bus_callback(GstBus *bus, GstMessage *msg, gpointer data) {
         gchar *debug;
         GError *err;
         gst_message_parse_error(msg, &err, &debug);
-        LOG_ERROR("GStreamer error: %s", err->message);
+
+        // 添加详细的错误诊断
+        LOG_ERROR("GStreamer error: %s (domain: %d, code: %d)",
+                  err->message, err->domain, err->code);
+
+        // 检查特定错误类型
+        if (err->domain == GST_RESOURCE_ERROR) {
+            LOG_ERROR("Resource error details:");
+
+            // 获取更多资源错误信息
+            gchar *uri = NULL;
+            GstElement *src = gst_element_factory_make("uridecodebin", NULL);
+            if (src) {
+                g_object_get(src, "uri", &uri, NULL);
+                if (uri) {
+                    LOG_ERROR("URI: %s", uri);
+                    g_free(uri);
+                }
+                gst_object_unref(src);
+            }
+        }
+
         LOG_ERROR("Debug details: %s", debug);
         g_error_free(err);
         g_free(debug);
@@ -152,7 +168,7 @@ int player_play(const char* uri) {
     GstElement *convert = gst_element_factory_make("audioconvert", "convert");
     GstElement *resample = gst_element_factory_make("audioresample", "resample");
     GstElement *vol = gst_element_factory_make("volume", "vol");
-    GstElement *sink = gst_element_factory_make("autoaudiosink", "sink");
+    GstElement *sink = gst_element_factory_make("alsasink", "sink");
 
     if (!pipeline || !source || !convert || !resample || !vol || !sink) {
         LOG_ERROR("Failed to create GStreamer elements");
@@ -160,7 +176,11 @@ int player_play(const char* uri) {
         pipeline = NULL;
         return -1;
     }
-
+    g_object_set(sink,
+        "device", "hw:0,0",          // 明确指定设备
+        "buffer-time", 50000,      // 缓冲区大小（微秒）
+        "latency-time", 10000,     // 延迟时间
+        NULL);
     // 添加元素到管道
     gst_bin_add_many(GST_BIN(pipeline), source, convert, resample, vol, sink, NULL);
 
@@ -199,7 +219,7 @@ int player_play(const char* uri) {
     pthread_detach(loop_thread);
 
     // 给事件循环时间启动
-    usleep(10000);
+    g_usleep(10000);
 
     // 启动播放
     GstStateChangeReturn ret = gst_element_set_state(pipeline, GST_STATE_PLAYING);

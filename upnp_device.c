@@ -19,6 +19,8 @@
 #define AVTRANSPORT_SERVICE "urn:schemas-upnp-org:service:AVTransport:1"
 #define RENDERING_SERVICE "urn:schemas-upnp-org:service:RenderingControl:1"
 
+int CURRENT_LOG_LEVEL = LOG_LEVEL_INFO;
+
 volatile sig_atomic_t running = 1;
 static pthread_mutex_t renderer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -57,7 +59,7 @@ void generate_uuid(char *uuid_str) {
 }
 
 void handle_sigint(int sig) {
-    printf("\nCaught SIGINT (Ctrl+C), exiting...\n");
+    LOG_INFO("Caught SIGINT (Ctrl+C), exiting...");
     running = 0;
 }
 
@@ -71,7 +73,7 @@ static char *read_file_to_memory(const char *filepath, size_t *length) {
     fseek(file, 0, SEEK_END);
     long size = ftell(file);
     fseek(file, 0, SEEK_SET);
-    
+
     if (size <= 0) {
         fclose(file);
         return NULL;
@@ -98,7 +100,7 @@ int create_virtual_file(const char *real_path, const char *virtual_path, const c
     size_t size;
     char *data = read_file_to_memory(real_path, &size);
     if (!data) {
-        fprintf(stderr, "Failed to read file: %s\n", real_path);
+        LOG_ERROR( "Failed to read file: %s", real_path);
         return -1;
     }
 
@@ -115,7 +117,7 @@ int create_virtual_file(const char *real_path, const char *virtual_path, const c
     vf->next = virtual_files;
     virtual_files = vf;
 
-    printf("Loaded virtual file: %s -> %s (%zu bytes)\n", 
+    LOG_DEBUG("Loaded virtual file: %s -> %s (%zu bytes)",
            real_path, virtual_path, size);
     return 0;
 }
@@ -124,7 +126,7 @@ int load_virtual_files(const VirtualFileEntry *entries, size_t count) {
         if (create_virtual_file(entries[i].real_path,
                               entries[i].virtual_path,
                               entries[i].content_type) != 0) {
-            fprintf(stderr, "Failed to load: %s\n", entries[i].real_path);
+            LOG_ERROR( "Failed to load: %s", entries[i].real_path);
             return -1;
         }
     }
@@ -141,7 +143,7 @@ void free_virtual_files(void) {
         current = next;
     }
     virtual_files = NULL;
-    printf("Freed all virtual files\n");
+    LOG_DEBUG("Freed all virtual files");
 }
 
 static struct virtual_file *get_file_by_name(const char *filename) {
@@ -163,7 +165,7 @@ int my_get_info(const char *filename, UpnpFileInfo *info) {
         UpnpFileInfo_set_LastModified(info, time(NULL));
         UpnpFileInfo_set_IsDirectory(info, 0);
         UpnpFileInfo_set_IsReadable(info, 1);
-        
+
         // 克隆字符串以避免内存问题
         char *content_type = ixmlCloneDOMString(virtfile->content_type);
         UpnpFileInfo_set_ContentType(info, content_type);
@@ -242,19 +244,19 @@ struct UpnpVirtualDirCallbacks virtual_dir_callbacks = {
 int webserver_register_callbacks(void) {
     int rc = UpnpSetVirtualDirCallbacks(&virtual_dir_callbacks);
     if (rc != UPNP_E_SUCCESS) {
-        fprintf(stderr, "UpnpSetVirtualDirCallbacks failed: %s (%d)\n",
+        LOG_ERROR( "UpnpSetVirtualDirCallbacks failed: %s (%d)",
                 UpnpGetErrorMessage(rc), rc);
         return -1;
     }
 
     rc = UpnpAddVirtualDir(VIRTUAL_DIR);
     if (rc != UPNP_E_SUCCESS) {
-        fprintf(stderr, "UpnpAddVirtualDir failed: %s (%d)\n",
+        LOG_ERROR( "UpnpAddVirtualDir failed: %s (%d)",
                 UpnpGetErrorMessage(rc), rc);
         return -1;
     }
 
-    printf("Registered virtual directory callbacks\n");
+    LOG_DEBUG("Registered virtual directory callbacks success");
     return 0;
 }
 
@@ -280,18 +282,18 @@ const char* get_action_argument(struct Upnp_Action_Request* request, const char*
 int set_error_response(struct Upnp_Action_Request* request, int error_code, const char* error_msg) {
     UpnpActionRequest_set_ErrCode(request, error_code);
     snprintf(request->ErrStr, sizeof(request->ErrStr), "%s", error_msg);
-    fprintf(stderr, "Action error [%d]: %s\n", error_code, error_msg);
+    LOG_ERROR( "Action error [%d]: %s", error_code, error_msg);
     return UPNP_E_SUCCESS;
 }
 
 static char* escape_xml(const char *input) {
     if (!input) return NULL;
-    
+
     size_t len = strlen(input);
     size_t escaped_len = len * 6 + 1; // 最坏情况下每个字符变成6个字符(&quot;)
     char *output = malloc(escaped_len);
     if (!output) return NULL;
-    
+
     size_t j = 0;
     for (size_t i = 0; i < len; i++) {
         switch (input[i]) {
@@ -302,7 +304,7 @@ static char* escape_xml(const char *input) {
             case '\'': strcpy(output + j, "&apos;"); j += 6; break;
             default: output[j++] = input[i]; break;
         }
-        
+
         // 防止缓冲区溢出
         if (j >= escaped_len - 6) {
             output[j] = '\0';
@@ -318,10 +320,10 @@ IXML_Document* create_response_document(const char* action_name, const char* ser
     snprintf(resp_buf, sizeof(resp_buf),
         "<u:%sResponse xmlns:u=\"%s\">%s</u:%sResponse>",
         action_name, service_type, content, action_name);
-    
+
     IXML_Document *doc = ixmlParseBuffer(resp_buf);
     if (!doc) {
-        fprintf(stderr, "Failed to parse response XML\n");
+        LOG_ERROR( "Failed to parse response XML");
     }
     return doc;
 }
@@ -332,7 +334,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
     }
 
     struct Upnp_Action_Request* request = (struct Upnp_Action_Request*)event;
-    printf("\nAction request: %s for service: %s\n",
+    LOG_DEBUG("Action request: %s for service: %s",
            request->ActionName, request->ServiceID);
 
     const char* service_type = NULL;
@@ -342,12 +344,12 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
     } else if (strcmp(request->ServiceID, "urn:upnp-org:serviceId:RenderingControl") == 0) {
         service_type = RENDERING_SERVICE;
     } else {
-        fprintf(stderr, "Unknown service ID: %s\n", request->ServiceID);
+        LOG_ERROR( "Unknown service ID: %s", request->ServiceID);
         return set_error_response(request, 700, "Unknown service");
     }
 
     pthread_mutex_lock(&renderer_mutex);
-    
+
     // 处理具体动作
     if (strcmp(request->ActionName, "SetAVTransportURI") == 0) {
         const char* uri = get_action_argument(request, "CurrentURI");
@@ -365,9 +367,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         g_renderer_ctx.current_uri[sizeof(g_renderer_ctx.current_uri)-1] = '\0';
         g_renderer_ctx.playing = 0;
         g_renderer_ctx.paused = 0;
-        
-        printf("Set URI: %s\n", g_renderer_ctx.current_uri);
-        
+
+        LOG_DEBUG("Set URI: %s", g_renderer_ctx.current_uri);
+
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
         if (resp) {
             request->ActionResult = resp;
@@ -391,7 +393,6 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             if (ret == 0) {
                 g_renderer_ctx.playing = 1;
                 g_renderer_ctx.paused = 0;
-                printf("2222 Playback started\n");
             }
         }
 
@@ -410,7 +411,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             g_renderer_ctx.playing = 0;
             g_renderer_ctx.paused = 0;
         } else {
-            printf("Stop failed (not playing?)\n");
+            LOG_ERROR("Stop failed (not playing?)");
         }
 
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
@@ -456,14 +457,14 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         }
 
         int total_seconds = hours * 3600 + minutes * 60 + seconds;
-        
+
         if (player_seek(total_seconds) != 0) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 708, "Seek failed");
         }
 
-        printf("Seek to %s (%d seconds)\n", target, total_seconds);
-        
+        LOG_DEBUG("Seek to %s (%d seconds)", target, total_seconds);
+
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
         if (resp) {
             request->ActionResult = resp;
@@ -472,20 +473,20 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
     else if (strcmp(request->ActionName, "GetPositionInfo") == 0) {
         int curr_sec = 0, total_sec = 0;
         player_get_position(&curr_sec, &total_sec);
-    
+
         char relTime[16], trackDur[16];
         snprintf(relTime, sizeof(relTime), "%02d:%02d:%02d",
                  curr_sec/3600, (curr_sec%3600)/60, curr_sec%60);
         snprintf(trackDur, sizeof(trackDur), "%02d:%02d:%02d",
                  total_sec/3600, (total_sec%3600)/60, total_sec%60);
-    
+
         // 转义当前URI
         char *escaped_uri = escape_xml(g_renderer_ctx.current_uri);
         if (!escaped_uri) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 715, "Failed to escape URI");
         }
-    
+
         // 使用更大的缓冲区
         char content[8192];
         int written = snprintf(content, sizeof(content),
@@ -499,20 +500,20 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             "<AbsCount>2147483647</AbsCount>",
             trackDur, escaped_uri,
             relTime, relTime);
-    
+
         free(escaped_uri);
-    
+
         if (written >= sizeof(content)) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 716, "Response too large");
         }
-    
+
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
         } else {
-            fprintf(stderr, "Failed to create response document for GetPositionInfo\n");
-            fprintf(stderr, "Content was: %s\n", content);
+            LOG_ERROR( "Failed to create response document for GetPositionInfo");
+            LOG_ERROR( "Content was: %s", content);
         }
     }
     else if (strcmp(request->ActionName, "GetTransportInfo") == 0) {
@@ -525,14 +526,14 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         } else {
             transport_state = "STOPPED";
         }
-    
+
         char content[512];
         snprintf(content, sizeof(content),
             "<CurrentTransportState>%s</CurrentTransportState>"
             "<CurrentTransportStatus>OK</CurrentTransportStatus>"
             "<CurrentSpeed>1</CurrentSpeed>",
             transport_state);
-    
+
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
@@ -542,13 +543,13 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         // 获取当前播放位置和总时长
         int curr_sec = 0, total_sec = 0;
         player_get_position(&curr_sec, &total_sec);
-    
+
         char relTime[16], trackDur[16];
         snprintf(relTime, sizeof(relTime), "%02d:%02d:%02d",
                  curr_sec/3600, (curr_sec%3600)/60, curr_sec%60);
         snprintf(trackDur, sizeof(trackDur), "%02d:%02d:%02d",
                  total_sec/3600, (total_sec%3600)/60, total_sec%60);
-    
+
         // 构造响应XML
         char content[2048];
         snprintf(content, sizeof(content),
@@ -562,7 +563,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             "<RecordMedium>NOT_IMPLEMENTED</RecordMedium>"
             "<WriteStatus>NOT_IMPLEMENTED</WriteStatus>",
             trackDur, g_renderer_ctx.current_uri);
-    
+
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
@@ -574,7 +575,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         if (!channel) {
             channel = "Master";
         }
-        
+
         // 获取当前音量值
         int volume = 0;
         if (strcmp(channel, "Master") == 0) {
@@ -584,12 +585,12 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 710, "Unsupported channel");
         }
-        
+
         // 构造响应XML
         char content[128];
-        snprintf(content, sizeof(content), 
+        snprintf(content, sizeof(content),
                  "<CurrentVolume>%d</CurrentVolume>", volume);
-                 
+
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
@@ -601,20 +602,20 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         if (!channel) {
             channel = "Master";
         }
-        
+
         // 获取音量值
         const char* desired_volume = get_action_argument(request, "DesiredVolume");
         if (!desired_volume) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 711, "Missing volume value");
         }
-        
+
         int volume = atoi(desired_volume);
         if (volume < 0 || volume > 100) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 712, "Volume out of range");
         }
-        
+
         // 设置音量
         int ret = 0;
         if (strcmp(channel, "Master") == 0) {
@@ -623,18 +624,18 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 713, "Unsupported channel");
         }
-        
+
         if (ret != 0) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 714, "Set volume failed");
         }
-        
+
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
         if (resp) {
             request->ActionResult = resp;
         }
     }else {
-        fprintf(stderr, "Unhandled action: %s\n", request->ActionName);
+        LOG_ERROR( "Unhandled action: %s", request->ActionName);
         pthread_mutex_unlock(&renderer_mutex);
         return set_error_response(request, 709, "Unsupported action");
     }
@@ -646,15 +647,15 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
 static int device_event_handler(Upnp_EventType event_type, void* event, void* cookie) {
     switch (event_type) {
         case UPNP_EVENT_SUBSCRIPTION_REQUEST:
-            printf("[EVENT] Subscription request\n");
+            LOG_INFO("[EVENT] Subscription request");
             break;
         case UPNP_CONTROL_ACTION_REQUEST:
             return action_handler(event_type, event, cookie);
         case UPNP_EVENT_RECEIVED:
-            printf("[EVENT] Event received\n");
+            LOG_INFO("[EVENT] Event received");
             break;
         default:
-            printf("Unhandled event: %d\n", event_type);
+            LOG_INFO("Unhandled event: %d", event_type);
             break;
     }
     return UPNP_E_SUCCESS;
@@ -719,17 +720,17 @@ char* generate_device_description(const char* udn) {
         "</root>";
 
     // 计算所需空间
-    size_t needed = snprintf(NULL, 0, templ_fmt, 
+    size_t needed = snprintf(NULL, 0, templ_fmt,
                            UPNP_DEVICE_TYPE, hostname, udn,
                            AVTRANSPORT_SERVICE, RENDERING_SERVICE) + 1;
-    
+
     char* desc = malloc(needed);
     if (!desc) return NULL;
-    
-    snprintf(desc, needed, templ_fmt, 
+
+    snprintf(desc, needed, templ_fmt,
              UPNP_DEVICE_TYPE, hostname, udn,
              AVTRANSPORT_SERVICE, RENDERING_SERVICE);
-    
+
     return desc;
 }
 
@@ -739,11 +740,11 @@ int main(int argc, char *argv[]) {
     unsigned short port = 49494;
     UpnpDevice_Handle device_handle = 0;
 
-    printf("\n===== Starting DLNA Media Renderer =====\n");
+    LOG_INFO("===== Starting DLNA Media Renderer =====");
 
     // 初始化播放器模块
     if (player_init() != 0) {
-        fprintf(stderr, "Failed to initialize player\n");
+        LOG_ERROR("Failed to initialize player");
         return EXIT_FAILURE;
     }
 
@@ -754,7 +755,7 @@ int main(int argc, char *argv[]) {
     generate_uuid(uuid_str);
     char udn[64];
     snprintf(udn, sizeof(udn), "uuid:%s", uuid_str);
-    printf("Device UDN: %s\n", udn);
+    LOG_DEBUG("Device UDN: %s", udn);
 
     VirtualFileEntry vfiles[] = {
         {"./icons/grender-64x64.png", "/virtual/grender-64x64.png", "image/png"},
@@ -765,18 +766,18 @@ int main(int argc, char *argv[]) {
 
     // 加载虚拟文件
     if (load_virtual_files(vfiles, sizeof(vfiles)/sizeof(vfiles[0])) != 0) {
-        fprintf(stderr, "Failed to load virtual files\n");
+        LOG_ERROR("Failed to load virtual files");
         goto cleanup;
     }
 
     // 初始化UPnP
     rc = UpnpInit2(interface, port);
     if (rc != UPNP_E_SUCCESS) {
-        fprintf(stderr, "UpnpInit2 failed: %s\n", UpnpGetErrorMessage(rc));
+        LOG_ERROR( "UpnpInit2 failed: %s", UpnpGetErrorMessage(rc));
         goto cleanup;
     }
 
-    printf("UPnP running at %s:%d\n",
+    LOG_INFO("UPnP running at %s:%d",
            UpnpGetServerIpAddress(), UpnpGetServerPort());
 
     // 注册web服务回调函数
@@ -787,7 +788,7 @@ int main(int argc, char *argv[]) {
     // 生成设备描述
     char* desc_xml = generate_device_description(udn);
     if (!desc_xml) {
-        fprintf(stderr, "Failed to generate device description\n");
+        LOG_ERROR( "Failed to generate device description");
         goto cleanup;
     }
 
@@ -803,19 +804,19 @@ int main(int argc, char *argv[]) {
     free(desc_xml);
 
     if (rc != UPNP_E_SUCCESS) {
-        fprintf(stderr, "Device registration failed: %s\n",
+        LOG_ERROR( "Device registration failed: %s",
                 UpnpGetErrorMessage(rc));
         goto cleanup;
     }
 
     rc = UpnpSendAdvertisement(device_handle, 1800);
     if (rc != UPNP_E_SUCCESS) {
-        fprintf(stderr, "Advertisement failed: %s\n",
+        LOG_ERROR( "Advertisement failed: %s",
                 UpnpGetErrorMessage(rc));
         goto cleanup;
     }
 
-    printf("DLNA Renderer is running. Press Ctrl+C to exit...\n");
+    LOG_INFO("DLNA Renderer is running. Press Ctrl+C to exit...");
 
     while (running) {
         sleep(10);
@@ -824,24 +825,24 @@ int main(int argc, char *argv[]) {
     }
 
 cleanup:
-    printf("\n===== Cleaning up resources =====\n");
-    
+    LOG_INFO("===== Cleaning up resources =====");
+
     // 停止播放器
     if (player_is_playing() || g_renderer_ctx.paused) {
         player_stop();
     }
-    
+
     // 释放资源
     player_deinit();
     free_virtual_files();
-    
+
     if (device_handle) {
         UpnpUnRegisterRootDevice(device_handle);
     }
-    
+
     UpnpFinish();
     pthread_mutex_destroy(&renderer_mutex);
-    
-    printf("DLNA Renderer exited cleanly\n");
+
+    LOG_INFO("DLNA Renderer exited cleanly");
     return EXIT_SUCCESS;
 }
