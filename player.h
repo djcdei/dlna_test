@@ -49,6 +49,10 @@ int player_get_position(int* current_sec, int* total_sec);
 
 int player_get_volume(void);
 
+int player_set_mute(int mute);
+
+int player_get_mute(int *mute);
+
 int player_set_volume(int volume);
 
 int player_is_playing(void);

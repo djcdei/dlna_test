@@ -19,7 +19,7 @@
 #define AVTRANSPORT_SERVICE "urn:schemas-upnp-org:service:AVTransport:1"
 #define RENDERING_SERVICE "urn:schemas-upnp-org:service:RenderingControl:1"
 
-int CURRENT_LOG_LEVEL = LOG_LEVEL_INFO;
+int CURRENT_LOG_LEVEL = LOG_LEVEL_DEBUG;
 
 volatile sig_atomic_t running = 1;
 static pthread_mutex_t renderer_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -551,7 +551,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
                  total_sec/3600, (total_sec%3600)/60, total_sec%60);
 
         // 构造响应XML
-        char content[2048];
+        char content[8192];
         snprintf(content, sizeof(content),
             "<NrTracks>1</NrTracks>"
             "<MediaDuration>%s</MediaDuration>"
@@ -634,6 +634,12 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         if (resp) {
             request->ActionResult = resp;
         }
+    }
+    else if (strcmp(request->ActionName, "GetMute") == 0) {
+
+    }
+    else if (strcmp(request->ActionName, "SetMute") == 0) {
+
     }else {
         LOG_ERROR( "Unhandled action: %s", request->ActionName);
         pthread_mutex_unlock(&renderer_mutex);
@@ -826,11 +832,6 @@ int main(int argc, char *argv[]) {
 
 cleanup:
     LOG_INFO("===== Cleaning up resources =====");
-
-    // 停止播放器
-    if (player_is_playing() || g_renderer_ctx.paused) {
-        player_stop();
-    }
 
     // 释放资源
     player_deinit();
