@@ -59,6 +59,10 @@ int player_is_playing(void);
 
 int player_deinit(void);
 
+int run_main_loop(void);
+
+int set_hw_volume_from_gst(double volume, const char *card, const char *selem_name);
+
 #ifdef __cplusplus
 }
 #endif

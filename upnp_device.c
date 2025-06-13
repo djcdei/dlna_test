@@ -21,7 +21,6 @@
 
 int CURRENT_LOG_LEVEL = LOG_LEVEL_DEBUG;
 
-volatile sig_atomic_t running = 1;
 static pthread_mutex_t renderer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct {
@@ -56,11 +55,6 @@ void generate_uuid(char *uuid_str) {
     uuid_t uuid;
     uuid_generate(uuid);
     uuid_unparse(uuid, uuid_str);
-}
-
-void handle_sigint(int sig) {
-    LOG_INFO("Caught SIGINT (Ctrl+C), exiting...");
-    running = 0;
 }
 
 static char *read_file_to_memory(const char *filepath, size_t *length) {
@@ -316,15 +310,40 @@ static char* escape_xml(const char *input) {
 }
 
 IXML_Document* create_response_document(const char* action_name, const char* service_type, const char* content) {
-    char resp_buf[2048];
-    snprintf(resp_buf, sizeof(resp_buf),
-        "<u:%sResponse xmlns:u=\"%s\">%s</u:%sResponse>",
-        action_name, service_type, content, action_name);
-
-    IXML_Document *doc = ixmlParseBuffer(resp_buf);
-    if (!doc) {
-        LOG_ERROR( "Failed to parse response XML");
+    if (!action_name || !service_type || !content) {
+        LOG_ERROR("Invalid argument in create_response_document");
+        return NULL;
     }
+
+    // 模板格式：<u:ActionResponse xmlns:u="...">...</u:ActionResponse>
+    const char* fmt = "<u:%sResponse xmlns:u=\"%s\">%s</u:%sResponse>";
+
+    // 计算所需缓冲区长度（+1 是为了 '\0'）
+    int len = snprintf(NULL, 0, fmt, action_name, service_type, content, action_name) + 1;
+    if (len <= 0) {
+        LOG_ERROR("Failed to calculate XML buffer size");
+        return NULL;
+    }
+
+    // 分配足够的内存
+    char* resp_buf = (char*)malloc(len);
+    if (!resp_buf) {
+        LOG_ERROR("Out of memory in create_response_document");
+        return NULL;
+    }
+
+    // 生成 XML 字符串
+    snprintf(resp_buf, len, fmt, action_name, service_type, content, action_name);
+
+    // 解析为 IXML_Document
+    IXML_Document* doc = ixmlParseBuffer(resp_buf);
+    if (!doc) {
+        LOG_ERROR("Failed to parse response XML");
+    }
+
+    // 释放临时缓冲区
+    free(resp_buf);
+
     return doc;
 }
 
@@ -338,6 +357,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
            request->ActionName, request->ServiceID);
 
     const char* service_type = NULL;
+    int ret = 0;
 
     if (strcmp(request->ServiceID, "urn:upnp-org:serviceId:AVTransport") == 0) {
         service_type = AVTRANSPORT_SERVICE;
@@ -358,11 +378,6 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             return set_error_response(request, 701, "Invalid URI");
         }
 
-        // 停止当前播放
-        if (player_is_playing() || g_renderer_ctx.paused) {
-            player_stop();
-        }
-
         strncpy(g_renderer_ctx.current_uri, uri, sizeof(g_renderer_ctx.current_uri) - 1);
         g_renderer_ctx.current_uri[sizeof(g_renderer_ctx.current_uri)-1] = '\0';
         g_renderer_ctx.playing = 0;
@@ -370,6 +385,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
 
         LOG_DEBUG("Set URI: %s", g_renderer_ctx.current_uri);
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
         if (resp) {
             request->ActionResult = resp;
@@ -381,7 +399,6 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             return set_error_response(request, 702, "URI not set");
         }
 
-        int ret = 0;
         if (g_renderer_ctx.paused) {
             ret = player_resume();
             if (ret == 0) {
@@ -401,6 +418,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             return set_error_response(request, 703, "Playback failed");
         }
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "<Speed>1</Speed>");
         if (resp) {
             request->ActionResult = resp;
@@ -430,6 +450,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             g_renderer_ctx.paused = 1;
         }
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
         if (resp) {
             request->ActionResult = resp;
@@ -465,6 +488,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
 
         LOG_DEBUG("Seek to %s (%d seconds)", target, total_seconds);
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
         if (resp) {
             request->ActionResult = resp;
@@ -508,6 +534,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             return set_error_response(request, 716, "Response too large");
         }
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
@@ -534,6 +563,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             "<CurrentSpeed>1</CurrentSpeed>",
             transport_state);
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
@@ -564,6 +596,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             "<WriteStatus>NOT_IMPLEMENTED</WriteStatus>",
             trackDur, g_renderer_ctx.current_uri);
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
@@ -591,6 +626,9 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         snprintf(content, sizeof(content),
                  "<CurrentVolume>%d</CurrentVolume>", volume);
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
         if (resp) {
             request->ActionResult = resp;
@@ -599,6 +637,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
     else if (strcmp(request->ActionName, "SetVolume") == 0) {
         // 获取声道参数
         const char* channel = get_action_argument(request, "Channel");
+	LOG_DEBUG("channel: %s",channel);
         if (!channel) {
             channel = "Master";
         }
@@ -617,7 +656,6 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         }
 
         // 设置音量
-        int ret = 0;
         if (strcmp(channel, "Master") == 0) {
             ret = player_set_volume(volume);
         } else {
@@ -630,16 +668,46 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             return set_error_response(request, 714, "Set volume failed");
         }
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
         IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
         if (resp) {
             request->ActionResult = resp;
         }
     }
     else if (strcmp(request->ActionName, "GetMute") == 0) {
+        // 构造响应XML体，返回当前静音状态
+        char content[256];
+	int mute = 0;
+	player_get_mute(&mute);
+        snprintf(content, sizeof(content),
+                 "<CurrentMute>%d</CurrentMute>", mute);
 
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
+        IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
+        if (resp) {
+            request->ActionResult = resp;
+        }
     }
     else if (strcmp(request->ActionName, "SetMute") == 0) {
+	const char* desired_mute = get_action_argument(request, "DesiredMute");
+	if (!desired_mute) {
+	    pthread_mutex_unlock(&renderer_mutex);
+	    return set_error_response(request, 715, "Missing mute value");
+	}
 
+	int mute = atoi(desired_mute);
+	if (request->ActionResult) {
+	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
+	}
+        // 构造空响应体
+        IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
+        if (resp) {
+             request->ActionResult = resp;
+        }
     }else {
         LOG_ERROR( "Unhandled action: %s", request->ActionName);
         pthread_mutex_unlock(&renderer_mutex);
@@ -754,8 +822,6 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    signal(SIGINT, handle_sigint);
-
     // 生成唯一设备ID
     char uuid_str[37];
     generate_uuid(uuid_str);
@@ -823,12 +889,7 @@ int main(int argc, char *argv[]) {
     }
 
     LOG_INFO("DLNA Renderer is running. Press Ctrl+C to exit...");
-
-    while (running) {
-        sleep(10);
-        // 定期重新发送广告
-        UpnpSendAdvertisement(device_handle, 1800);
-    }
+    run_main_loop();
 
 cleanup:
     LOG_INFO("===== Cleaning up resources =====");
@@ -839,10 +900,15 @@ cleanup:
 
     if (device_handle) {
         UpnpUnRegisterRootDevice(device_handle);
+	device_handle = 0;
     }
-
-    UpnpFinish();
+    // 取消虚拟目录回调
+    UpnpSetVirtualDirCallbacks(NULL);
+    // 安全销毁互斥锁
+    pthread_mutex_lock(&renderer_mutex);
+    pthread_mutex_unlock(&renderer_mutex);
     pthread_mutex_destroy(&renderer_mutex);
+    UpnpFinish();
 
     LOG_INFO("DLNA Renderer exited cleanly");
     return EXIT_SUCCESS;
