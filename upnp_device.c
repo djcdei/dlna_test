@@ -338,7 +338,7 @@ IXML_Document* create_response_document(const char* action_name, const char* ser
     // 解析为 IXML_Document
     IXML_Document* doc = ixmlParseBuffer(resp_buf);
     if (!doc) {
-        LOG_ERROR("Failed to parse response XML");
+        LOG_ERROR("acticon_name: %s Failed to parse response XML\nresp_buf: %s",action_name,resp_buf);
     }
 
     // 释放临时缓冲区
@@ -353,8 +353,8 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
     }
 
     struct Upnp_Action_Request* request = (struct Upnp_Action_Request*)event;
-    LOG_DEBUG("Action request: %s for service: %s",
-           request->ActionName, request->ServiceID);
+    //LOG_DEBUG("Action request: %s for service: %s",
+    //       request->ActionName, request->ServiceID);
 
     const char* service_type = NULL;
     int ret = 0;
@@ -526,8 +526,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             "<AbsCount>2147483647</AbsCount>",
             trackDur, escaped_uri,
             relTime, relTime);
-
-        free(escaped_uri);
+	if(escaped_uri)free(escaped_uri);
 
         if (written >= sizeof(content)) {
             pthread_mutex_unlock(&renderer_mutex);
@@ -582,6 +581,12 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         snprintf(trackDur, sizeof(trackDur), "%02d:%02d:%02d",
                  total_sec/3600, (total_sec%3600)/60, total_sec%60);
 
+        // 转义当前URI
+        char *escaped_uri = escape_xml(g_renderer_ctx.current_uri);
+        if (!escaped_uri) {
+            pthread_mutex_unlock(&renderer_mutex);
+            return set_error_response(request, 715, "Failed to escape URI");
+        }
         // 构造响应XML
         char content[8192];
         snprintf(content, sizeof(content),
@@ -594,7 +599,8 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             "<PlayMedium>NETWORK</PlayMedium>"
             "<RecordMedium>NOT_IMPLEMENTED</RecordMedium>"
             "<WriteStatus>NOT_IMPLEMENTED</WriteStatus>",
-            trackDur, g_renderer_ctx.current_uri);
+            trackDur, escaped_uri);
+	if(escaped_uri)free(escaped_uri);
 
 	if (request->ActionResult) {
 	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档

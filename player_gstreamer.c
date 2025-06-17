@@ -119,13 +119,13 @@ static gboolean bus_callback(GstBus *bus, GstMessage *msg, gpointer data) {
         gst_message_parse_buffering(msg, &percent);
         LOG_DEBUG("Buffering: %d%%", percent);
 
-        // 处理网络流缓冲
-        if (percent < 100) {
-            gst_element_set_state(pipeline, GST_STATE_PAUSED);
-        } else {
-            gst_element_set_state(pipeline, GST_STATE_PLAYING);
-        }
-        break;
+    //    // 处理网络流缓冲
+    //    if (percent < 10) {
+    //        gst_element_set_state(pipeline, GST_STATE_PAUSED);
+    //    } else {
+    //        gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    //    }
+    //    break;
     }
 
     case GST_MESSAGE_STREAM_START:
@@ -251,7 +251,7 @@ int player_seek(int seconds) {
 }
 
 int player_get_position(int* current_sec, int* total_sec) {
-    LOG_DEBUG("-----[%s] starting-----",__func__);
+    //LOG_DEBUG("-----[%s] starting-----",__func__);
     pthread_mutex_lock(&lock);
 
     if (!pipeline) {
@@ -267,20 +267,20 @@ int player_get_position(int* current_sec, int* total_sec) {
 
     if (duration_success && total_sec) {
         *total_sec = (int)(duration_ns / GST_SECOND);
-        LOG_DEBUG("Duration: %d sec", *total_sec);
+        //LOG_DEBUG("Duration: %d sec", *total_sec);
     } else if (total_sec) {
         *total_sec = -1;
     }
 
     if (position_success && current_sec) {
         *current_sec = (int)(position_ns / GST_SECOND);
-        LOG_DEBUG("Position: %d sec", *current_sec);
+        //LOG_DEBUG("Position: %d sec", *current_sec);
     } else if (current_sec) {
         *current_sec = -1;
     }
 
     pthread_mutex_unlock(&lock);
-    LOG_DEBUG("-----[%s] end-----",__func__);
+    //LOG_DEBUG("-----[%s] end-----",__func__);
     return (duration_success && position_success) ? 0 : -1;
 }
 
