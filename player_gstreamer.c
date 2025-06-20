@@ -12,15 +12,57 @@ static volatile int playing = 0;
 static volatile int paused = 0;
 static gint64 duration_ns = 0;
 static gint64 position_ns = 0;
-static int current_volume = 20;
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static GMainLoop *main_loop = NULL;
 static int g_running = 0;
-static const char *g_card = "hw:0";         // 或 "default"
-static const char *g_selem_name = "DAC volume"; // 或 "PCM", "Speaker"
 static pthread_t progress_thread;
-static int g_volume_changed_by_controller = 0;
+static int g_volume_changed_by_controller = 0;//音量改变标致，同步到对应硬件
 
+typedef struct {
+    const char* card;//声卡设备
+    const char* selem_name;//ALSA元素名
+    int buffer_time;//缓冲时间
+    int latency_time;//延迟时间
+    int initial_volume;//初始音量(未设置的话会读取默认硬件音量)
+} PlayerOptions;
+
+static PlayerOptions g_player_options = {
+    .card = "hw:0",
+    .selem_name = "DAC volume",
+    .buffer_time = 200000,
+    .latency_time = 10000,
+    .initial_volume = 0
+};
+
+static GOptionEntry player_option_entries[] = {
+    { "card", 'c', 0, G_OPTION_ARG_STRING, &g_player_options.card,
+      "ALSA sound card (e.g., hw:0)", "CARD" },
+    { "selem-name", 's', 0, G_OPTION_ARG_STRING, &g_player_options.selem_name,
+      "ALSA element name (e.g., DAC volume)", "SELEM" },
+    { "buffer-time", 'B', 0, G_OPTION_ARG_INT, &g_player_options.buffer_time,
+      "GStreamer buffer time in microseconds (default: 200000)", "TIME" },
+    { "latency-time", 'L', 0, G_OPTION_ARG_INT, &g_player_options.latency_time,
+      "GStreamer latency time in microseconds (default: 10000)", "TIME" },
+    { "volume", 'V', 0, G_OPTION_ARG_INT, &g_player_options.initial_volume,
+      "Initial volume level (0-100, default: 0)", "VOLUME" },
+    { NULL }
+};
+
+// 获取播放器选项组
+GOptionGroup* player_get_option_group(void) {
+    GOptionGroup *group = g_option_group_new(
+        "player",
+        "Player Options",
+        "Show player configuration options",
+        NULL,
+        NULL
+    );
+    
+    g_option_group_add_entries(group, player_option_entries);
+    return group;
+}
+
+// 实时获取播放进度线程
 static void* update_track_time_thread(void* arg) {
     GstFormat fmt = GST_FORMAT_TIME;
     gint64 pos = 0;
@@ -43,98 +85,168 @@ static void* update_track_time_thread(void* arg) {
     return NULL;
 }
 
-// 总线回调（添加缓冲处理）
+static void query_audio_stream_info(GstElement *pipeline) {
+    GstElement *audio_sink = NULL;
+    g_object_get(pipeline, "audio-sink", &audio_sink, NULL);
+    if (!audio_sink) {
+        LOG_ERROR("audio-sink not available");
+        return;
+    }
+
+    GstPad *sinkpad = gst_element_get_static_pad(audio_sink, "sink");
+    if (!sinkpad) {
+        LOG_ERROR("audio-sink pad not found");
+        gst_object_unref(audio_sink);
+        return;
+    }
+
+    GstCaps *caps = gst_pad_get_current_caps(sinkpad);
+    if (!caps) {
+        LOG_ERROR("No caps available on pad (likely not negotiated yet)");
+        gst_object_unref(sinkpad);
+        gst_object_unref(audio_sink);
+        return;
+    }
+
+    GstStructure *str = gst_caps_get_structure(caps, 0);
+    if (!str) {
+        LOG_ERROR("Failed to get structure from caps");
+        gst_caps_unref(caps);
+        gst_object_unref(sinkpad);
+        gst_object_unref(audio_sink);
+        return;
+    }
+
+    const gchar *media_type = gst_structure_get_name(str);
+    const gchar *format = gst_structure_get_string(str, "format");
+
+    gint rate = 0, channels = 0;
+    gst_structure_get_int(str, "rate", &rate);
+    gst_structure_get_int(str, "channels", &channels);
+
+    const gchar *layout = NULL;
+    if (gst_structure_has_field(str, "layout"))
+        layout = gst_structure_get_string(str, "layout");
+
+    gint width = 0, depth = 0, signed_flag = -1, endianness = -1;
+    gboolean is_float = FALSE;
+
+    gst_structure_get_int(str, "width", &width);       // 每通道位宽
+    gst_structure_get_int(str, "depth", &depth);       // 实际使用位数
+    gst_structure_get_int(str, "endianness", &endianness); // 1234 = LE
+    gst_structure_get_boolean(str, "signed", &signed_flag);
+    gst_structure_get_boolean(str, "floating", &is_float);
+
+    LOG_INFO("Media Type: %s", media_type);
+    LOG_INFO("Format:     %s", format ? format : "N/A");
+    LOG_INFO("SampleRate: %d Hz", rate);
+    LOG_INFO("Channels:   %d", channels);
+    LOG_INFO("Layout:     %s", layout ? layout : "N/A");
+    //LOG_INFO("Width:      %d bits per sample (declared)", width);
+    //LOG_INFO("Depth:      %d bits used per sample", depth);
+    //LOG_INFO("Endian:     %s", (endianness == G_LITTLE_ENDIAN) ? "Little Endian" :
+    //                             (endianness == G_BIG_ENDIAN) ? "Big Endian" : "Unknown");
+    //LOG_INFO("Signed:     %s", (signed_flag == 1) ? "Yes" : "No");
+    //LOG_INFO("Floating:   %s", is_float ? "Yes" : "No");
+
+    gst_caps_unref(caps);
+    gst_object_unref(sinkpad);
+    gst_object_unref(audio_sink);
+}
+
+// 总线回调
 static gboolean bus_callback(GstBus *bus, GstMessage *msg, gpointer data) {
     (void)bus; (void)data;
 
     switch (GST_MESSAGE_TYPE(msg)) {
-    case GST_MESSAGE_EOS:
-        LOG_DEBUG("[%s] End of stream reached",__func__);
-        pthread_mutex_lock(&lock);
-        playing = 0;
-        pthread_mutex_unlock(&lock);
-        break;
+    	case GST_MESSAGE_EOS:
+    	    LOG_DEBUG("[%s] End of stream reached",__func__);
+    	    pthread_mutex_lock(&lock);
+    	    playing = 0;
+    	    pthread_mutex_unlock(&lock);
+    	    break;
 
-    case GST_MESSAGE_ERROR: {
-        gchar *debug;
-        GError *err;
-        gst_message_parse_error(msg, &err, &debug);
+    	case GST_MESSAGE_ERROR: {
+    	    gchar *debug;
+    	    GError *err;
+    	    gst_message_parse_error(msg, &err, &debug);
 
-        // 添加详细的错误诊断
-        LOG_ERROR("GStreamer error: %s (domain: %d, code: %d)",
-                  err->message, err->domain, err->code);
+    	    // 添加详细的错误诊断
+    	    LOG_ERROR("GStreamer error: %s (domain: %d, code: %d)",
+    	              err->message, err->domain, err->code);
 
-        // 检查特定错误类型
-        if (err->domain == GST_RESOURCE_ERROR) {
-            LOG_ERROR("Resource error details:");
+    	    // 检查特定错误类型
+    	    if (err->domain == GST_RESOURCE_ERROR) {
+    	        LOG_ERROR("Resource error details:");
 
-            // 获取更多资源错误信息
-            gchar *uri = NULL;
-            GstElement *src = gst_element_factory_make("uridecodebin", NULL);
-            if (src) {
-                g_object_get(src, "uri", &uri, NULL);
-                if (uri) {
-                    LOG_ERROR("URI: %s", uri);
-                    g_free(uri);
-                }
-                gst_object_unref(src);
-            }
-        }
+    	        // 获取更多资源错误信息
+    	        gchar *uri = NULL;
+    	        GstElement *src = gst_element_factory_make("uridecodebin", NULL);
+    	        if (src) {
+    	            g_object_get(src, "uri", &uri, NULL);
+    	            if (uri) {
+    	                LOG_ERROR("URI: %s", uri);
+    	                g_free(uri);
+    	            }
+    	            gst_object_unref(src);
+    	        }
+    	    }
 
-        LOG_ERROR("Debug details: %s", debug);
-        g_error_free(err);
-        g_free(debug);
+    	    LOG_ERROR("Debug details: %s", debug);
+    	    g_error_free(err);
+    	    g_free(debug);
 
-        pthread_mutex_lock(&lock);
-        playing = 0;
-        pthread_mutex_unlock(&lock);
-        break;
-    }
-    //pipeline状态变化
-    case GST_MESSAGE_STATE_CHANGED:
-        if (GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline)) {
-            GstState old_state, new_state, pending;
-            gst_message_parse_state_changed(msg, &old_state, &new_state, &pending);
-            LOG_DEBUG("State changed: %s -> %s (pending: %s)",
-                      gst_element_state_get_name(old_state),
-                      gst_element_state_get_name(new_state),
-                      gst_element_state_get_name(pending));
+    	    pthread_mutex_lock(&lock);
+    	    playing = 0;
+    	    pthread_mutex_unlock(&lock);
+    	    break;
+    	}
+    	//pipeline状态变化
+    	case GST_MESSAGE_STATE_CHANGED:
+    	    if (GST_MESSAGE_SRC(msg) == GST_OBJECT(pipeline)) {
+    	        GstState old_state, new_state, pending;
+    	        gst_message_parse_state_changed(msg, &old_state, &new_state, &pending);
+    	        LOG_DEBUG("State changed: %s -> %s (pending: %s)",
+    	                  gst_element_state_get_name(old_state),
+    	                  gst_element_state_get_name(new_state),
+    	                  gst_element_state_get_name(pending));
 
-            pthread_mutex_lock(&lock);
-            if (new_state == GST_STATE_PLAYING) {
-                playing = 1;
-                paused = 0;
-            } else if (new_state == GST_STATE_PAUSED) {
-                paused = 1;
-            } else if (new_state == GST_STATE_READY) {
-            } else if (new_state == GST_STATE_NULL) {
-                playing = 0;
-            }
-            pthread_mutex_unlock(&lock);
-        }
-        break;
+    	        pthread_mutex_lock(&lock);
+    	        if (new_state == GST_STATE_PLAYING) {
+		    query_audio_stream_info(pipeline);
+    	            playing = 1;
+    	            paused = 0;
+    	        } else if (new_state == GST_STATE_PAUSED) {
+    	            paused = 1;
+    	        } else if (new_state == GST_STATE_READY) {
+    	        } else if (new_state == GST_STATE_NULL) {
+    	            playing = 0;
+    	        }
+    	        pthread_mutex_unlock(&lock);
+    	    }
+    	    break;
 
-    case GST_MESSAGE_BUFFERING: {
-        gint percent = 0;
-        gst_message_parse_buffering(msg, &percent);
-        LOG_DEBUG("Buffering: %d%%", percent);
+    	case GST_MESSAGE_BUFFERING: {
+    	    gint percent = 0;
+    	    gst_message_parse_buffering(msg, &percent);
+    	    LOG_DEBUG("Buffering: %d%%", percent);
 
-    //    // 处理网络流缓冲
-    //    if (percent < 10) {
-    //        gst_element_set_state(pipeline, GST_STATE_PAUSED);
-    //    } else {
-    //        gst_element_set_state(pipeline, GST_STATE_PLAYING);
-    //    }
-    //    break;
-    }
+    	//    // 处理网络流缓冲
+    	//    if (percent < 10) {
+    	//        gst_element_set_state(pipeline, GST_STATE_PAUSED);
+    	//    } else {
+    	//        gst_element_set_state(pipeline, GST_STATE_PLAYING);
+    	//    }
+    	//    break;
+    	}
 
-    case GST_MESSAGE_STREAM_START:
-        LOG_DEBUG("Stream started");
-        break;
+    	case GST_MESSAGE_STREAM_START:
+    	    LOG_DEBUG("Stream started");
+    	    break;
 
-    default:
-        //LOG_DEBUG("Received %s message", GST_MESSAGE_TYPE_NAME(msg));
-        break;
+    	default:
+    	    //LOG_DEBUG("Received %s message", GST_MESSAGE_TYPE_NAME(msg));
+    	    break;
     }
     return TRUE;
 }
@@ -285,8 +397,8 @@ int player_get_position(int* current_sec, int* total_sec) {
 }
 
 int player_get_volume(void) {
-    LOG_DEBUG("Getting volume: %d%%", current_volume);
-    return current_volume;
+    LOG_DEBUG("Getting volume: %d%%", g_player_options.initial_volume);
+    return g_player_options.initial_volume;
 }
 
 int player_set_volume(int volume) {
@@ -296,9 +408,9 @@ int player_set_volume(int volume) {
     if (volume > 100) volume = 100;
 
     pthread_mutex_lock(&lock);
-    current_volume = volume;
+    g_player_options.initial_volume = volume;
     g_object_set(pipeline, "volume", (double)volume/100.0, NULL);
-    player_set_mute(current_volume == 0);
+    player_set_mute(g_player_options.initial_volume == 0);
     g_volume_changed_by_controller = 1;
     pthread_mutex_unlock(&lock);
 
@@ -349,7 +461,7 @@ int run_main_loop(void){
    return 0;
 }
 
-static void list_mixer_controls(const char *card) {
+void list_mixer_controls(const char *card) {
     snd_mixer_t *handle;
     snd_mixer_elem_t *elem;
 
@@ -374,16 +486,15 @@ static void list_mixer_controls(const char *card) {
 int get_hw_volume(long *out_vol, long *min_out, long *max_out) {
     snd_mixer_t *handle = NULL;
     snd_mixer_selem_id_t *sid = NULL;
-    list_mixer_controls(g_card);
     int err = 0;
-
+    list_mixer_controls(g_player_options.card);
     if ((err = snd_mixer_open(&handle, 0)) < 0) {
         LOG_ERROR("snd_mixer_open failed: %s", snd_strerror(err));
         return err;
     }
 
-    if ((err = snd_mixer_attach(handle, g_card)) < 0) {
-        LOG_ERROR("snd_mixer_attach('%s') failed: %s", g_card, snd_strerror(err));
+    if ((err = snd_mixer_attach(handle, g_player_options.card)) < 0) {
+        LOG_ERROR("snd_mixer_attach('%s') failed: %s", g_player_options.card, snd_strerror(err));
         goto error;
     }
 
@@ -399,11 +510,11 @@ int get_hw_volume(long *out_vol, long *min_out, long *max_out) {
 
     snd_mixer_selem_id_malloc(&sid);
     snd_mixer_selem_id_set_index(sid, 0);
-    snd_mixer_selem_id_set_name(sid, g_selem_name);
+    snd_mixer_selem_id_set_name(sid, g_player_options.selem_name);
 
     snd_mixer_elem_t *elem = snd_mixer_find_selem(handle, sid);
     if (!elem) {
-        LOG_ERROR("snd_mixer_find_selem('%s') failed", g_selem_name);
+        LOG_ERROR("snd_mixer_find_selem('%s') failed",g_player_options.selem_name);
         err = -1;
         goto error;
     }
@@ -444,33 +555,27 @@ int set_hw_volume_from_gst(double volume, const char *card, const char *selem_na
         LOG_ERROR("snd_mixer_open failed: %s\n", snd_strerror(err));
         return err;
     }
-
     if ((err = snd_mixer_attach(handle, card)) < 0) {
         LOG_ERROR("snd_mixer_attach('%s') failed: %s\n", card, snd_strerror(err));
         goto fail;
     }
-
     if ((err = snd_mixer_selem_register(handle, NULL, NULL)) < 0) {
         LOG_ERROR("snd_mixer_selem_register failed: %s\n", snd_strerror(err));
         goto fail;
     }
-
     if ((err = snd_mixer_load(handle)) < 0) {
         LOG_ERROR("snd_mixer_load failed: %s\n", snd_strerror(err));
         goto fail;
     }
-
     snd_mixer_selem_id_malloc(&sid);
     snd_mixer_selem_id_set_index(sid, 0);
     snd_mixer_selem_id_set_name(sid, selem_name);
-
     elem = snd_mixer_find_selem(handle, sid);
     if (!elem) {
         LOG_ERROR("snd_mixer_find_selem('%s') failed\n", selem_name);
         err = -1;
         goto fail;
     }
-
     snd_mixer_selem_get_playback_volume_range(elem, &minv, &maxv);
     hw_vol = minv + volume * (maxv - minv);
     LOG_DEBUG("[%s] hw_vol: %ld",__func__,hw_vol);
@@ -481,8 +586,6 @@ int set_hw_volume_from_gst(double volume, const char *card, const char *selem_na
     }
     //snd_mixer_selem_set_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT, hw_vol);
     //snd_mixer_selem_set_playback_volume(elem, SND_MIXER_SCHN_FRONT_RIGHT, hw_vol);
-
-
     snd_mixer_selem_id_free(sid);
     snd_mixer_close(handle);
     return 0;
@@ -495,7 +598,6 @@ fail:
 
 int player_init(void) {
     LOG_INFO("Initializing player");
-
     if (!gst_is_initialized()) {
         LOG_DEBUG("Initializing GStreamer");
         gst_init(NULL, NULL);
@@ -505,32 +607,42 @@ int player_init(void) {
         gst_version(&major, &minor, &micro, &nano);
         LOG_INFO("GStreamer version: %u.%u.%u.%u", major, minor, micro, nano);
     }
+    //创建一个名为player的playbin元素
     pipeline = gst_element_factory_make("playbin", "player");
     if (!pipeline) {
         LOG_ERROR("Failed to create playbin pipeline");
         return -1;
     }
-
     // 配置音频输出
     GstElement *audio_sink = gst_element_factory_make("alsasink", "audio-output");
     if (audio_sink) {
         g_object_set(audio_sink,
-            "device", "hw:0,0",
-            "buffer-time", 200000,
-            "latency-time", 10000,
+            "device", g_player_options.card,
+            "buffer-time", g_player_options.buffer_time,
+            "latency-time", g_player_options.latency_time,
             NULL);
-        g_object_set(pipeline, "audio-sink", audio_sink, NULL);
+	gst_object_ref(audio_sink);  // 增加引用给 playbin 使用
+        g_object_set(pipeline, "audio-sink", audio_sink, NULL);//将alsasink绑定到管道，playbin会自动连接音频流到我们指定的sink
+	gst_object_unref(audio_sink);  // 释放引用
+	audio_sink = NULL;
     }
 
     // 忽略视频
     g_object_set(pipeline, "video-sink", gst_element_factory_make("fakesink", NULL), NULL);
-    long hw_vol = 0, vol_min = 0, vol_max = 0;
-    if (get_hw_volume(&hw_vol, &vol_min, &vol_max) == 0) {
-        current_volume = (double)(hw_vol - vol_min) / (vol_max - vol_min)*100.0;
-        LOG_INFO("Current hardware volume: %ld (range: %ld ~ %ld), software volume: %d%%", hw_vol, vol_min, vol_max, current_volume);
-		g_object_set(pipeline, "volume", (double)(hw_vol - vol_min) / (vol_max - vol_min), NULL);
-    } else {
-        LOG_ERROR("Failed to get hardware volume");
+
+    if(!g_player_options.initial_volume){ //没有指定音量，就根据硬件音量设置软件音量
+        long hw_vol = 0, vol_min = 0, vol_max = 0;
+        if (get_hw_volume(&hw_vol, &vol_min, &vol_max) == 0) {
+            g_player_options.initial_volume = (double)(hw_vol - vol_min) / (vol_max - vol_min)*100.0;
+            LOG_DEBUG("Current hardware volume: %ld (range: %ld ~ %ld), software volume: %d%%", hw_vol, vol_min, vol_max, g_player_options.initial_volume);
+            g_object_set(pipeline, "volume", (double)g_player_options.initial_volume/100.0, NULL);	
+        } else {
+            LOG_ERROR("Failed to get hardware volume");
+        }
+    }else if(g_player_options.initial_volume){
+	    LOG_DEBUG("Current software volume: %d%%",g_player_options.initial_volume);
+            g_object_set(pipeline, "volume", (double)g_player_options.initial_volume/100.0, NULL);	
+	    g_volume_changed_by_controller = 1; //保存当前音量到硬件
     }
 
     // 设置总线监听
@@ -538,7 +650,7 @@ int player_init(void) {
     gst_bus_add_watch(bus, bus_callback, NULL);//非阻塞，消息作为事件源挂到GLib主循环
     gst_object_unref(bus);
 
-    //创建获取播放信息线程
+    //创建获取播放信息线程,循环读取播放进度
     g_running = 1;
     pthread_create(&progress_thread, NULL, update_track_time_thread, NULL);
     return 0;
@@ -555,10 +667,14 @@ int player_deinit(void) {
     if (pipeline) {
         GstElement *audio_sink = NULL;
         g_object_get(pipeline, "audio-sink", &audio_sink, NULL);
-        if (audio_sink) {
-	    LOG_DEBUG("unref audio_sink");
-            gst_object_unref(audio_sink);  // 显式释放音频接收器
-        }
+    	if (audio_sink) {
+    	    if (GST_IS_ELEMENT(audio_sink)) {
+    	        gst_element_set_state(audio_sink, GST_STATE_NULL);
+    	    }
+    	    gst_object_unref(audio_sink);
+    	    audio_sink = NULL;
+    	}
+
         GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
         gst_bus_remove_watch(bus);  // 移除监视器
         gst_object_unref(bus);
@@ -568,7 +684,7 @@ int player_deinit(void) {
     gst_deinit();
     pthread_mutex_lock(&lock);  // 先获取锁
     if (g_volume_changed_by_controller) {
-        set_hw_volume_from_gst((double)current_volume / 100.0, g_card, g_selem_name);
+        set_hw_volume_from_gst((double)g_player_options.initial_volume / 100.0, g_player_options.card, g_player_options.selem_name);
     }
     pthread_mutex_unlock(&lock);  // 再释放
     pthread_mutex_destroy(&lock);//销毁锁

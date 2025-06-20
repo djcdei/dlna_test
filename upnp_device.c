@@ -12,6 +12,8 @@
 #include <uuid/uuid.h>
 #include <netdb.h>
 #include <pthread.h>
+#include <glib.h>
+#include <glib/gprintf.h>
 #include "player.h"
 
 #define VIRTUAL_DIR "/virtual"
@@ -20,6 +22,32 @@
 #define RENDERING_SERVICE "urn:schemas-upnp-org:service:RenderingControl:1"
 
 int CURRENT_LOG_LEVEL = LOG_LEVEL_DEBUG;
+
+typedef struct {
+   const gchar* renderer_name;
+   const gchar* interface_name;
+	 guint port;
+   const gchar* uuid;
+} AppOptions;
+
+static AppOptions g_options = {
+	.renderer_name = "DLNA MediaRenderer",
+	.interface_name = "eth0",
+	.port = 49494,
+	.uuid = 0
+};
+
+static GOptionEntry option_entries[] = {
+    { "name", 'n', 0, G_OPTION_ARG_STRING, &g_options.renderer_name,
+      "Renderer friendly name", "NAME" },
+    { "interface-name", 'I', 0, G_OPTION_ARG_STRING, &g_options.interface_name,
+      "The local interface name the service is running and advertised", "NULL" },
+    { "port", 'p', 0, G_OPTION_ARG_INT, &g_options.port,
+      "Port number (default: 49494)", "PORT" },
+    { "uuid", 'u', 0, G_OPTION_ARG_STRING, &g_options.uuid,
+      "Custom device UUID", "UUID" },
+    { NULL }
+};
 
 static pthread_mutex_t renderer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -309,6 +337,7 @@ static char* escape_xml(const char *input) {
     return output;
 }
 
+//自己实现的响应xml构造函数
 IXML_Document* create_response_document(const char* action_name, const char* service_type, const char* content) {
     if (!action_name || !service_type || !content) {
         LOG_ERROR("Invalid argument in create_response_document");
@@ -345,6 +374,100 @@ IXML_Document* create_response_document(const char* action_name, const char* ser
     free(resp_buf);
 
     return doc;
+}
+
+//结合使用libupnp提供的api处理xml文件
+int get_media_info(IXML_Document **resp, const char *action, const char *service_type)
+{
+    int curr = 0, total = 0;
+    if (*resp) {
+        ixmlDocument_free(*resp);
+        *resp = NULL;
+    }
+
+    player_get_position(&curr, &total);
+
+    char trackDur[16];
+    snprintf(trackDur, sizeof(trackDur), "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60);
+
+    int ret = 0;
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "NrTracks", "1");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "MediaDuration", trackDur);
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "CurrentURI", g_renderer_ctx.current_uri);
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "CurrentURIMetaData", "");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "NextURI", "");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "NextURIMetaData", "");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "PlayMedium", "NETWORK");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "RecordMedium", "NOT_IMPLEMENTED");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "WriteStatus", "NOT_IMPLEMENTED");
+    return ret;
+}
+
+int get_position_info(IXML_Document **resp, const char *action, const char *service_type)
+{
+    int curr = 0, total = 0;
+    if (*resp) {
+        ixmlDocument_free(*resp);
+        *resp = NULL;
+    }
+
+    player_get_position(&curr, &total);
+
+    char relTime[16], trackDur[16];
+    snprintf(relTime, sizeof(relTime), "%02d:%02d:%02d", curr / 3600, (curr % 3600) / 60, curr % 60);
+    snprintf(trackDur, sizeof(trackDur), "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60);
+
+    int ret = 0;
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "Track", "0");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "TrackDuration", trackDur);
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "TrackMetaData", "");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "TrackURI", g_renderer_ctx.current_uri);
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "RelTime", relTime);
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "AbsTime", relTime);
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "RelCount", "2147483647");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "AbsCount", "2147483647");
+    return ret;
+}
+
+int get_transport_info(IXML_Document **resp, const char *action, const char *service_type)
+{
+    int ret = 0;
+    const char *transport_state;
+    if (*resp) {
+        ixmlDocument_free(*resp);
+        *resp = NULL;
+    }
+
+    if (g_renderer_ctx.playing) {
+        transport_state = "PLAYING";
+    } else if (g_renderer_ctx.paused) {
+        transport_state = "PAUSED_PLAYBACK";
+    } else {
+        transport_state = "STOPPED";
+    }
+
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "CurrentTransportState", transport_state);
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "CurrentTransportStatus", "OK");
+    ret |= UpnpAddToActionResponse(resp, action, service_type, "CurrentSpeed", "1");
+    return ret;
+}
+//构建空响应
+int create_empty_response(IXML_Document **resp, const char *action, const char *service_type)
+{
+    if (!resp || !action || !service_type) {
+        return -1;
+    }
+    if (*resp) {
+        ixmlDocument_free(*resp);
+        *resp = NULL;
+    }
+
+    *resp = UpnpMakeActionResponse(action, service_type, 0, NULL);
+    if (*resp == NULL) {
+        return -1;
+    }
+
+    return 0;
 }
 
 int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
@@ -385,13 +508,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
 
         LOG_DEBUG("Set URI: %s", g_renderer_ctx.current_uri);
 
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
-        if (resp) {
-            request->ActionResult = resp;
-        }
+	create_empty_response(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "Play") == 0) {
         if (strlen(g_renderer_ctx.current_uri) == 0) {
@@ -412,7 +529,6 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
                 g_renderer_ctx.paused = 0;
             }
         }
-
         if (ret != 0) {
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 703, "Playback failed");
@@ -421,10 +537,8 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
 	if (request->ActionResult) {
 	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
 	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, "<Speed>1</Speed>");
-        if (resp) {
-            request->ActionResult = resp;
-        }
+        request->ActionResult = UpnpMakeActionResponse(request->ActionName, service_type, 1,
+	"Speed","1");
     }
     else if (strcmp(request->ActionName, "Stop") == 0) {
         if (player_stop() == 0) {
@@ -434,10 +548,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             LOG_ERROR("Stop failed (not playing?)");
         }
 
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
-        if (resp) {
-            request->ActionResult = resp;
-        }
+	create_empty_response(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "Pause") == 0) {
         if (!player_is_playing()) {
@@ -450,13 +561,7 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             g_renderer_ctx.paused = 1;
         }
 
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
-        if (resp) {
-            request->ActionResult = resp;
-        }
+	create_empty_response(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "Seek") == 0) {
         const char* unit = get_action_argument(request, "Unit");
@@ -488,127 +593,16 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
 
         LOG_DEBUG("Seek to %s (%d seconds)", target, total_seconds);
 
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
-        if (resp) {
-            request->ActionResult = resp;
-        }
+	create_empty_response(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "GetPositionInfo") == 0) {
-        int curr_sec = 0, total_sec = 0;
-        player_get_position(&curr_sec, &total_sec);
-
-        char relTime[16], trackDur[16];
-        snprintf(relTime, sizeof(relTime), "%02d:%02d:%02d",
-                 curr_sec/3600, (curr_sec%3600)/60, curr_sec%60);
-        snprintf(trackDur, sizeof(trackDur), "%02d:%02d:%02d",
-                 total_sec/3600, (total_sec%3600)/60, total_sec%60);
-
-        // 转义当前URI
-        char *escaped_uri = escape_xml(g_renderer_ctx.current_uri);
-        if (!escaped_uri) {
-            pthread_mutex_unlock(&renderer_mutex);
-            return set_error_response(request, 715, "Failed to escape URI");
-        }
-
-        // 使用更大的缓冲区
-        char content[8192];
-        int written = snprintf(content, sizeof(content),
-            "<Track>0</Track>"
-            "<TrackDuration>%s</TrackDuration>"
-            "<TrackMetaData></TrackMetaData>"
-            "<TrackURI>%s</TrackURI>"
-            "<RelTime>%s</RelTime>"
-            "<AbsTime>%s</AbsTime>"
-            "<RelCount>2147483647</RelCount>"
-            "<AbsCount>2147483647</AbsCount>",
-            trackDur, escaped_uri,
-            relTime, relTime);
-	if(escaped_uri)free(escaped_uri);
-
-        if (written >= sizeof(content)) {
-            pthread_mutex_unlock(&renderer_mutex);
-            return set_error_response(request, 716, "Response too large");
-        }
-
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
-        if (resp) {
-            request->ActionResult = resp;
-        } else {
-            LOG_ERROR( "Failed to create response document for GetPositionInfo");
-            LOG_ERROR( "Content was: %s", content);
-        }
+	get_position_info(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "GetTransportInfo") == 0) {
-        // 构造响应XML
-        const char *transport_state;
-        if (g_renderer_ctx.playing) {
-            transport_state = "PLAYING";
-        } else if (g_renderer_ctx.paused) {
-            transport_state = "PAUSED_PLAYBACK";
-        } else {
-            transport_state = "STOPPED";
-        }
-
-        char content[512];
-        snprintf(content, sizeof(content),
-            "<CurrentTransportState>%s</CurrentTransportState>"
-            "<CurrentTransportStatus>OK</CurrentTransportStatus>"
-            "<CurrentSpeed>1</CurrentSpeed>",
-            transport_state);
-
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
-        if (resp) {
-            request->ActionResult = resp;
-        }
+	get_transport_info(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "GetMediaInfo") == 0) {
-        // 获取当前播放位置和总时长
-        int curr_sec = 0, total_sec = 0;
-        player_get_position(&curr_sec, &total_sec);
-
-        char relTime[16], trackDur[16];
-        snprintf(relTime, sizeof(relTime), "%02d:%02d:%02d",
-                 curr_sec/3600, (curr_sec%3600)/60, curr_sec%60);
-        snprintf(trackDur, sizeof(trackDur), "%02d:%02d:%02d",
-                 total_sec/3600, (total_sec%3600)/60, total_sec%60);
-
-        // 转义当前URI
-        char *escaped_uri = escape_xml(g_renderer_ctx.current_uri);
-        if (!escaped_uri) {
-            pthread_mutex_unlock(&renderer_mutex);
-            return set_error_response(request, 715, "Failed to escape URI");
-        }
-        // 构造响应XML
-        char content[8192];
-        snprintf(content, sizeof(content),
-            "<NrTracks>1</NrTracks>"
-            "<MediaDuration>%s</MediaDuration>"
-            "<CurrentURI>%s</CurrentURI>"
-            "<CurrentURIMetaData></CurrentURIMetaData>"
-            "<NextURI></NextURI>"
-            "<NextURIMetaData></NextURIMetaData>"
-            "<PlayMedium>NETWORK</PlayMedium>"
-            "<RecordMedium>NOT_IMPLEMENTED</RecordMedium>"
-            "<WriteStatus>NOT_IMPLEMENTED</WriteStatus>",
-            trackDur, escaped_uri);
-	if(escaped_uri)free(escaped_uri);
-
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
-        if (resp) {
-            request->ActionResult = resp;
-        }
+	get_media_info(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "GetVolume") == 0) {
         // 获取声道参数，默认为Master
@@ -616,29 +610,22 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         if (!channel) {
             channel = "Master";
         }
-
         // 获取当前音量值
         int volume = 0;
+        char content[8];
         if (strcmp(channel, "Master") == 0) {
-            volume = player_get_volume(); // 假设有这样一个函数
+            volume = player_get_volume();
+            snprintf(content, sizeof(content),
+                 "%d", volume);
         } else {
-            // 可以处理其他声道如 LF, RF 等
             pthread_mutex_unlock(&renderer_mutex);
             return set_error_response(request, 710, "Unsupported channel");
         }
-
-        // 构造响应XML
-        char content[128];
-        snprintf(content, sizeof(content),
-                 "<CurrentVolume>%d</CurrentVolume>", volume);
-
 	if (request->ActionResult) {
 	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
 	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
-        if (resp) {
-            request->ActionResult = resp;
-        }
+        request->ActionResult = UpnpMakeActionResponse(request->ActionName, service_type, 1,
+	"CurrentVolume",content);
     }
     else if (strcmp(request->ActionName, "SetVolume") == 0) {
         // 获取声道参数
@@ -647,7 +634,6 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         if (!channel) {
             channel = "Master";
         }
-
         // 获取音量值
         const char* desired_volume = get_action_argument(request, "DesiredVolume");
         if (!desired_volume) {
@@ -674,29 +660,20 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
             return set_error_response(request, 714, "Set volume failed");
         }
 
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
-        if (resp) {
-            request->ActionResult = resp;
-        }
+	create_empty_response(&(request->ActionResult), request->ActionName, service_type);
     }
     else if (strcmp(request->ActionName, "GetMute") == 0) {
         // 构造响应XML体，返回当前静音状态
-        char content[256];
+        char content[8];
 	int mute = 0;
 	player_get_mute(&mute);
         snprintf(content, sizeof(content),
-                 "<CurrentMute>%d</CurrentMute>", mute);
-
+                 "%d", mute);
 	if (request->ActionResult) {
 	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
 	}
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, content);
-        if (resp) {
-            request->ActionResult = resp;
-        }
+        request->ActionResult = UpnpMakeActionResponse(request->ActionName, service_type, 1,
+	"CurrentMute",content);
     }
     else if (strcmp(request->ActionName, "SetMute") == 0) {
 	const char* desired_mute = get_action_argument(request, "DesiredMute");
@@ -704,16 +681,8 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
 	    pthread_mutex_unlock(&renderer_mutex);
 	    return set_error_response(request, 715, "Missing mute value");
 	}
-
 	int mute = atoi(desired_mute);
-	if (request->ActionResult) {
-	    ixmlDocument_free(request->ActionResult);  // 释放旧的 XML 文档
-	}
-        // 构造空响应体
-        IXML_Document *resp = create_response_document(request->ActionName, service_type, "");
-        if (resp) {
-             request->ActionResult = resp;
-        }
+	create_empty_response(&(request->ActionResult), request->ActionName, service_type);
     }else {
         LOG_ERROR( "Unhandled action: %s", request->ActionName);
         pthread_mutex_unlock(&renderer_mutex);
@@ -756,7 +725,7 @@ char* generate_device_description(const char* udn) {
         "  </specVersion>"
         "  <device>"
         "    <deviceType>%s</deviceType>"
-        "    <friendlyName>DLNA Renderer (%s)</friendlyName>"
+        "    <friendlyName>%s (%s)</friendlyName>"
         "    <manufacturer>Open Source Project</manufacturer>"
         "    <manufacturerURL>https://github.com</manufacturerURL>"
         "    <modelDescription>UPnP Media Renderer</modelDescription>"
@@ -801,23 +770,47 @@ char* generate_device_description(const char* udn) {
 
     // 计算所需空间
     size_t needed = snprintf(NULL, 0, templ_fmt,
-                           UPNP_DEVICE_TYPE, hostname, udn,
+                           UPNP_DEVICE_TYPE, g_options.renderer_name, hostname, udn,
                            AVTRANSPORT_SERVICE, RENDERING_SERVICE) + 1;
 
     char* desc = malloc(needed);
     if (!desc) return NULL;
 
     snprintf(desc, needed, templ_fmt,
-             UPNP_DEVICE_TYPE, hostname, udn,
+             UPNP_DEVICE_TYPE, g_options.renderer_name, hostname, udn,
              AVTRANSPORT_SERVICE, RENDERING_SERVICE);
 
     return desc;
 }
 
+gboolean parse_command_line(int argc, char **argv) {
+    GOptionContext *context;//这个是GLlib提供的命令行解析器
+    GError *error = NULL;
+
+    // 初始化命令行解析上下文
+    context = g_option_context_new("- UPnP Media Renderer");
+    g_option_context_add_main_entries(context, option_entries, NULL);
+    // 添加播放器选项组(模块化设计，允许不同模块管理自己的命令行选项)
+    GOptionGroup *player_group = player_get_option_group();
+    g_option_context_add_group(context, player_group);
+
+    if (!g_option_context_parse(context, &argc, &argv, &error)) {
+        LOG_ERROR("option parsing failed: %s", error->message);
+        g_error_free(error);
+        g_option_context_free(context);
+        return FALSE;
+    }
+
+    g_option_context_free(context);
+    return TRUE;
+}
+
 int main(int argc, char *argv[]) {
     int rc;
-    const char *interface = NULL;
-    unsigned short port = 49494;
+
+    if(!parse_command_line(argc, argv)){
+	return EXIT_FAILURE;
+    }
     UpnpDevice_Handle device_handle = 0;
 
     LOG_INFO("===== Starting DLNA Media Renderer =====");
@@ -830,7 +823,11 @@ int main(int argc, char *argv[]) {
 
     // 生成唯一设备ID
     char uuid_str[37];
-    generate_uuid(uuid_str);
+    if (g_options.uuid) {
+        snprintf(uuid_str, sizeof(uuid_str), "%s", g_options.uuid);
+    } else {
+	generate_uuid(uuid_str);
+    }
     char udn[64];
     snprintf(udn, sizeof(udn), "uuid:%s", uuid_str);
     LOG_DEBUG("Device UDN: %s", udn);
@@ -849,7 +846,7 @@ int main(int argc, char *argv[]) {
     }
 
     // 初始化UPnP
-    rc = UpnpInit2(interface, port);
+    rc = UpnpInit2(g_options.interface_name, g_options.port);
     if (rc != UPNP_E_SUCCESS) {
         LOG_ERROR( "UpnpInit2 failed: %s", UpnpGetErrorMessage(rc));
         goto cleanup;

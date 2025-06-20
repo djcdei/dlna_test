@@ -1,8 +1,16 @@
 #ifndef PLAYER_H
 #define PLAYER_H
 
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <stdint.h>
+#include <glib.h>
+#include <gst/gst.h>
+#include <glib/gprintf.h>
+#include <alsa/asoundlib.h>
 
+#include <pthread.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -63,6 +71,9 @@ int run_main_loop(void);
 
 int set_hw_volume_from_gst(double volume, const char *card, const char *selem_name);
 
+void list_mixer_controls(const char *card);
+
+GOptionGroup* player_get_option_group(void);
 #ifdef __cplusplus
 }
 #endif
