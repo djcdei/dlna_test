@@ -19,7 +19,8 @@ static pthread_t progress_thread;
 static int g_volume_changed_by_controller = 0;//音量改变标致，同步到对应硬件
 
 typedef struct {
-    const char* card;//声卡设备
+    const char* device;//播放设备
+    const char* ctrl_card;//声卡控制接口名字
     const char* selem_name;//ALSA元素名
     int buffer_time;//缓冲时间
     int latency_time;//延迟时间
@@ -27,7 +28,8 @@ typedef struct {
 } PlayerOptions;
 
 static PlayerOptions g_player_options = {
-    .card = "hw:0",
+    .device = "hw:0,0",
+    .ctrl_card = "hw:0",
     .selem_name = "DAC volume",
     .buffer_time = 200000,
     .latency_time = 10000,
@@ -35,8 +37,10 @@ static PlayerOptions g_player_options = {
 };
 
 static GOptionEntry player_option_entries[] = {
-    { "card", 'c', 0, G_OPTION_ARG_STRING, &g_player_options.card,
-      "ALSA sound card (e.g., hw:0)", "CARD" },
+    { "device", 'd', 0, G_OPTION_ARG_STRING, &g_player_options.device,
+      "ALSA sound card device(e.g., hw:0,0)", "CARD DEVICE" },
+    { "ctrl", 'c', 0, G_OPTION_ARG_STRING, &g_player_options.ctrl_card,
+      "ALSA sound ctrl card (e.g., hw:0)", "CTRL CARD" },
     { "selem-name", 's', 0, G_OPTION_ARG_STRING, &g_player_options.selem_name,
       "ALSA element name (e.g., DAC volume)", "SELEM" },
     { "buffer-time", 'B', 0, G_OPTION_ARG_INT, &g_player_options.buffer_time,
@@ -461,12 +465,12 @@ int run_main_loop(void){
    return 0;
 }
 
-void list_mixer_controls(const char *card) {
+void list_mixer_controls(const char *ctrl_card) {
     snd_mixer_t *handle;
     snd_mixer_elem_t *elem;
 
     if (snd_mixer_open(&handle, 0) < 0) return;
-    if (snd_mixer_attach(handle, card) < 0) {
+    if (snd_mixer_attach(handle, ctrl_card) < 0) {
         snd_mixer_close(handle);
         return;
     }
@@ -487,14 +491,14 @@ int get_hw_volume(long *out_vol, long *min_out, long *max_out) {
     snd_mixer_t *handle = NULL;
     snd_mixer_selem_id_t *sid = NULL;
     int err = 0;
-    list_mixer_controls(g_player_options.card);
+    list_mixer_controls(g_player_options.ctrl_card);
     if ((err = snd_mixer_open(&handle, 0)) < 0) {
         LOG_ERROR("snd_mixer_open failed: %s", snd_strerror(err));
         return err;
     }
 
-    if ((err = snd_mixer_attach(handle, g_player_options.card)) < 0) {
-        LOG_ERROR("snd_mixer_attach('%s') failed: %s", g_player_options.card, snd_strerror(err));
+    if ((err = snd_mixer_attach(handle, g_player_options.ctrl_card)) < 0) {
+        LOG_ERROR("snd_mixer_attach('%s') failed: %s", g_player_options.ctrl_card, snd_strerror(err));
         goto error;
     }
 
@@ -538,7 +542,7 @@ error:
 }
 
 // 同步软件音量到硬件音量,参数 volume 范围为 0.0 到 1.0
-int set_hw_volume_from_gst(double volume, const char *card, const char *selem_name) {
+int set_hw_volume_from_gst(double volume, const char *ctrl_card, const char *selem_name) {
     LOG_DEBUG("[%s] volume: %f",__func__,volume);
     if (volume < 0.0) volume = 0.0;
     if (volume > 1.0) volume = 1.0;
@@ -555,8 +559,8 @@ int set_hw_volume_from_gst(double volume, const char *card, const char *selem_na
         LOG_ERROR("snd_mixer_open failed: %s\n", snd_strerror(err));
         return err;
     }
-    if ((err = snd_mixer_attach(handle, card)) < 0) {
-        LOG_ERROR("snd_mixer_attach('%s') failed: %s\n", card, snd_strerror(err));
+    if ((err = snd_mixer_attach(handle, ctrl_card)) < 0) {
+        LOG_ERROR("snd_mixer_attach('%s') failed: %s\n", ctrl_card, snd_strerror(err));
         goto fail;
     }
     if ((err = snd_mixer_selem_register(handle, NULL, NULL)) < 0) {
@@ -617,7 +621,7 @@ int player_init(void) {
     GstElement *audio_sink = gst_element_factory_make("alsasink", "audio-output");
     if (audio_sink) {
         g_object_set(audio_sink,
-            "device", g_player_options.card,
+            "device", g_player_options.device,
             "buffer-time", g_player_options.buffer_time,
             "latency-time", g_player_options.latency_time,
             NULL);
@@ -684,7 +688,7 @@ int player_deinit(void) {
     gst_deinit();
     pthread_mutex_lock(&lock);  // 先获取锁
     if (g_volume_changed_by_controller) {
-        set_hw_volume_from_gst((double)g_player_options.initial_volume / 100.0, g_player_options.card, g_player_options.selem_name);
+        set_hw_volume_from_gst((double)g_player_options.initial_volume / 100.0, g_player_options.ctrl_card, g_player_options.selem_name);
     }
     pthread_mutex_unlock(&lock);  // 再释放
     pthread_mutex_destroy(&lock);//销毁锁
