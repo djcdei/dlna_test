@@ -20,6 +20,7 @@
 #define UPNP_DEVICE_TYPE "urn:schemas-upnp-org:device:MediaRenderer:1"
 #define AVTRANSPORT_SERVICE "urn:schemas-upnp-org:service:AVTransport:1"
 #define RENDERING_SERVICE "urn:schemas-upnp-org:service:RenderingControl:1"
+#define CONNECTIONMANAGER_SERVICE "urn:schemas-upnp-org:service:ConnectionManager:1"
 
 int CURRENT_LOG_LEVEL = LOG_LEVEL_DEBUG;
 
@@ -486,8 +487,10 @@ int action_handler(Upnp_EventType event_type, void* event, void* cookie) {
         service_type = AVTRANSPORT_SERVICE;
     } else if (strcmp(request->ServiceID, "urn:upnp-org:serviceId:RenderingControl") == 0) {
         service_type = RENDERING_SERVICE;
+    } else if (strcmp(request->ServiceID, "urn:upnp-org:serviceId:ConnectionManager") == 0) {
+        service_type = CONNECTIONMANAGER_SERVICE;
     } else {
-        LOG_ERROR( "Unknown service ID: %s", request->ServiceID);
+        LOG_ERROR("Unknown service ID: %s", request->ServiceID);
         return set_error_response(request, 700, "Unknown service");
     }
 
@@ -764,6 +767,13 @@ char* generate_device_description(const char* udn) {
         "        <controlURL>/virtual/control/RenderingControl</controlURL>"
         "        <eventSubURL>/virtual/event/RenderingControl</eventSubURL>"
         "      </service>"
+	"     <service>"
+	"       <serviceType>%s</serviceType>"
+	"       <serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>"
+	"       <SCPDURL>/virtual/ConnectionManager.xml</SCPDURL>"
+	"       <controlURL>/virtual/control/ConnectionManager</controlURL>"
+	"       <eventSubURL>/virtual/event/ConnectionManager</eventSubURL>"
+	"     </service>"
         "    </serviceList>"
         "  </device>"
         "</root>";
@@ -771,14 +781,14 @@ char* generate_device_description(const char* udn) {
     // 计算所需空间
     size_t needed = snprintf(NULL, 0, templ_fmt,
                            UPNP_DEVICE_TYPE, g_options.renderer_name, hostname, udn,
-                           AVTRANSPORT_SERVICE, RENDERING_SERVICE) + 1;
+                           AVTRANSPORT_SERVICE, RENDERING_SERVICE, CONNECTIONMANAGER_SERVICE) + 1;
 
     char* desc = malloc(needed);
     if (!desc) return NULL;
 
     snprintf(desc, needed, templ_fmt,
              UPNP_DEVICE_TYPE, g_options.renderer_name, hostname, udn,
-             AVTRANSPORT_SERVICE, RENDERING_SERVICE);
+             AVTRANSPORT_SERVICE, RENDERING_SERVICE, CONNECTIONMANAGER_SERVICE);
 
     return desc;
 }
@@ -837,6 +847,7 @@ int main(int argc, char *argv[]) {
         {"./icons/grender-128x128.png", "/virtual/grender-128x128.png", "image/png"},
         {"./service/AVTransport.xml", "/virtual/AVTransport.xml", "text/xml"},
         {"./service/RenderingControl.xml", "/virtual/RenderingControl.xml", "text/xml"},
+        {"./service/ConnectionManager.xml", "/virtual/ConnectionManager.xml", "text/xml"},
     };
 
     // 加载虚拟文件
